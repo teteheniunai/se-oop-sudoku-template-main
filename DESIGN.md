@@ -1,45 +1,70 @@
 # Sudoku 游戏领域对象重构
 
-1) `Sudoku` / `Game` 的职责
 
-- `Sudoku`：只负责 9x9 盘面数据的存取、校验、胜利检测、冲突检测、深拷贝、序列化/反序列化和一个简易的 `toString()` 用于调试。
-- `Game`：作为聚合根，持有当前 `Sudoku`（`present`），并维护历史快照 `past`/`future` 以及 `initial`。它实现 `guess()`、`undo()`、`redo()`、`reset()`、序列化/反序列化等，UI 通过 `Game` 与领域交互。
+**一、`Sudoku` / `Game` 职责概述**
 
-2) `Move` 的设计
+- `Sudoku`（领域对象）
+	- 职责：持有 9x9 `grid`（number[][]），提供 `getGrid()`、`guess(move)`（在指定格子设置值或清空）、校验/冲突检测、胜利检测、`clone()`（返回独立副本）、`toJSON()`、`toString()`。
+	- 不负责：历史管理、UI 更新、持久化策略。
 
-- `Move` 只是一个值对象（`{ row, col, value }`），不需要身份，等价比较以内容为准，简单直接。
+- `Game`（聚合根 / 会话）
+	- 职责：持有当前 `Sudoku`（`present`），以及历史快照 `past`（数组）、重做栈 `future`（数组）、`initial`（开局）。实现 `guess(move)`（通过委托给 `Sudoku` 并记录历史）、`undo()`、`redo()`、`canUndo()`、`canRedo()`、`toJSON()`（包含 present/past/future/initial 的序列化数据）、以及注册变更回调（可选）。
 
-3) 历史（history）存储内容和原因
+**二、`Move` 的定义**
 
-- 我把 `past`/`future` 都存整盘的 `Sudoku` 快照（深拷贝）。理由：实现最直接，撤销/重做就是恢复快照；数独数据量小，性能开销能接受；避免引用共享导致的历史污染。
+- 结构：`{ row: number, col: number, value: number | null }`
+- 类型：值对象（value object）。理由：没有唯一标识符，两个内容相同的 `Move` 被视为相同；只用于描述一次变更。将其作为轻量数据传递而非持久化实体。
 
-4) 复制策略（为什么用深拷贝）
+**三、历史（history）存储策略**
 
-- 所有对外返回的 grid、以及保存到 `past`/`future`/`present`/`initial` 的时候都用 JSON 序列化/反序列化做深拷贝。
-- 理由：保证历史不可变，避免后续修改影响历史快照，撤销/重做才可靠。
+- 存储内容：`past` 与 `future` 存储的是 `Sudoku` 的快照（即 `grid` 的深拷贝），不是 `Move` 日志。
+- 理由：实现简单、语义清晰、撤销/重做直接通过恢复快照完成，避免对每种操作实现逆向逻辑。
+- 代价：内存消耗（9x9 的数字数组），对本作业规模可接受；若扩展应考虑差分（delta）。
 
-5) 序列化 / 反序列化
+**四、复制（copy）策略**
 
-- `Sudoku.toJSON()`、`Game.toJSON()` 输出纯数据结构（只包含 grid 数据），`fromJSON()` 能完整恢复 `present`、`past`、`future`、`initial`。
-- 这让本地存档（localStorage 三槽）可以直接存/读，读档后能恢复完整历史，支持之后继续 undo/redo。
+- 对 `grid` 使用深拷贝。实现方法优先使用 `JSON.parse(JSON.stringify(grid))` 或手写复制函数，以避免共享引用。
+- 必须深拷贝的时机：
+	- 在将 `present` 推入 `past` 前；
+	- 在返回 `getGrid()` 给 UI 时以防止 UI 侧直接修改内部状态；
+	- 在序列化/反序列化时重建对象。
+- 若误用浅拷贝会导致：历史快照与当前状态共享引用，后续修改会不可逆地污染历史，撤销失效。
 
-6) UI 与领域同步方式（为什么不用全局响应式双向同步）
+**五、序列化 / 反序列化**
 
-- 原因：直接让领域对象（`Game`）改动后通过一个显式同步操作把 `userGrid` 更新到 UI，可以避免响应式死循环（之前试过 `$: syncUserGrid()` 会导致循环）。
-- 具体做法：每次 `guess()` / `undo()` / `redo()` / `reset()` 后，调用 `Game.getSudoku().getGrid()` 然后逐格更新 `userGrid`（store）的值。这样 UI 始终和 `Game.present` 保持一致。
+- `Sudoku.toJSON()` 输出：`{ grid: number[][] }`。
+- `createSudokuFromJSON(json)`：接收上述结构，返回 `Sudoku` 实例（重建方法/校验器）。
+- `Game.toJSON()` 输出：
+	{
+		present: { grid },
+		past: [ { grid }, ... ],
+		future: [ { grid }, ... ],
+		initial: { grid }
+	}
+- 说明：只序列化纯数据（数字矩阵）。不序列化函数、回调或运行时状态（例如注册的 UI 回调）。
 
-7) 关于 undo/redo 的实现细节与回调机制
+**六、外表化（调试表示）**
 
-- `Game` 内部保存 `past`/`future`，`guess()` 会把当前 `present` 的深拷贝推入 `past`，并清空 `future`。
-- `undo()` 会把当前 `present` 推到 `future`，并弹出 `past` 的快照恢复为 `present`；`redo()` 反向操作。
-- 为了让 UI 按钮（↶ / ↷）能在其它组件操作后立即响应，我加了 `setOnChange(cb)` 接口：每当 `guess()`/`undo()`/`redo()`/`reset()` 完成时，`Game` 会调用注册的回调。UI 在回调里更新 `canUndo`/`canRedo` 等本地状态并同步 `userGrid`。
+- `Sudoku.toString()`：返回 9 行文本，每行 9 个字符或空格，使用 `.` 表示空格，方便在控制台查看。
+- `Sudoku.toJSON()`：便于机器可读的存档与恢复。
 
-8) 本地存档（3 槽）设计
+**七、Undo / Redo 行为细则**
 
-- 存档就是把 `Game.toJSON()` 存到 `localStorage` 的某个键里；读档会 `createGameFromJSON()` 恢复 `present`/`past`/`future`/`initial` 并同步到 `userGrid`，读档后可以继续 undo/redo。
+- `guess(move)`：将 `present` 的深拷贝 push 到 `past`，清空 `future`，然后在 `present` 上应用 `move`。
+- `undo()`：若 `past` 非空，则将当前 `present` 深拷贝 push 到 `future`，并把 `past.pop()` 的快照设为新的 `present`。
+- `redo()`：若 `future` 非空，则将当前 `present` 深拷贝 push 到 `past`，并把 `future.pop()` 的快照设为新的 `present`。
+- 新开局或 `reset()`：清空 `past`/`future`，设置 `initial = present`。
 
-9) 设计权衡与说明（why this way）
+**八、同步到 UI 的策略**
 
-- 简单优先：用快照实现历史简单且可靠，适合作业级别的工程。
-- 明确同步：显式从领域到 UI 的同步，避免复杂的双向响应式耦合和潜在死循环。
-- 可扩展：如果以后想优化内存，可以把快照改成差分（delta），但那会增加 undo/redo 逻辑复杂度，当前不需要。
+- 领域对象为数据与行为的唯一来源。每次领域状态变更后，`Game` 可触发已注册的变更回调，UI 在回调中用 `getSudoku().getGrid()` 完成渲染数据更新。
+
+**九、导出到工厂/接口**
+
+在 `src/domain/index.js` 需要导出的函数：
+
+- `export function createSudoku(input)` — input 为 `number[][]`，返回实现了 `getGrid()` / `guess()` / `clone()` / `toJSON()` / `toString()` 的对象。
+- `export function createSudokuFromJSON(json)` — 从 `{ grid }` 重建 `Sudoku`。
+- `export function createGame({ sudoku })` — 接受 `Sudoku` 实例并返回实现 `getSudoku()` / `guess()` / `undo()` / `redo()` / `canUndo()` / `canRedo()` / `toJSON()` 的 `Game` 实例。
+- `export function createGameFromJSON(json)` — 从 `Game.toJSON()` 恢复完整 `Game`（含 `past`/`future`/`initial`）。
+
