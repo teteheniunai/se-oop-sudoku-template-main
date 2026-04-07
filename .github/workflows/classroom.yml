@@ -30,7 +30,7 @@ jobs:
 
       - name: Install dependencies
         # 如果你没有上传 package-lock.json，请改为 npm install
-        run: npm install 
+        run: npm ci --legacy-peer-deps
 
       - name: Contract
         id: contract
